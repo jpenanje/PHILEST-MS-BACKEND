@@ -21,6 +21,7 @@ class Student(models.Model):
     parent_name = models.TextField(max_length=1000)
     parent_phone = models.CharField(max_length=256)
     current_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    owing = models.BooleanField(default=True)
 
 
 class Subject(models.Model):

@@ -6,13 +6,19 @@ from rest_framework.decorators import action
 from apis.serializers import *
 from apis.models import *
 from apis.pagination import CustomPagination
-from django.db.models import Sum, F,IntegerField
+from django.db.models import Sum, F,IntegerField, CharField
 from django.db.models.functions import Coalesce
 from datetime import datetime, timedelta
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.authtoken.models import Token
 from rest_framework.views import APIView
 from rest_framework import status
+from rest_framework.decorators import api_view
+from django.db.models import Q
+from django.db.models import Sum
+from django.db.models.functions import Cast
+from django.db.models import Subquery,OuterRef
+from rest_framework.settings import api_settings
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -66,14 +72,6 @@ class StudentViewSet(viewsets.ModelViewSet):
         academicYearsSerializer = AcademicYearSerializer(academicYears, many = True)
         return Response([classSerializer.data,academicYearsSerializer.data])
     
-    # def retrieve(self, request, *args, **kwargs):
-    #     instance = self.get_object()
-    #     classSerializer = ClassSerializer(instance.student_class)
-    #     serializer = self.get_serializer(instance)
-    #     student_data = serializer.data
-    #     student_data['class'] = classSerializer.data
-    #     return Response(student_data)
-    
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
@@ -103,7 +101,10 @@ class StudentViewSet(viewsets.ModelViewSet):
             student_id = str(cash_in['student'])
             if student_id not in cash_in_data_by_student:
                 cash_in_data_by_student[student_id] = []
-            cash_in_data_by_student[student_id].append(cash_in)
+            student = Student.objects.get(id = student_id)
+            print( str(cash_in["academic_year"]) +" == " + str(student.current_year.year))
+            if cash_in["academic_year"] == student.current_year.year:
+                cash_in_data_by_student[student_id].append(cash_in)
         
         for student in student_data:
             student_class_id = str(student['student_class'])
@@ -148,41 +149,61 @@ class StudentViewSet(viewsets.ModelViewSet):
         filter_registered = self.request.query_params.get('registered')
         if filter_registered:
             if(filter_registered == "yes" or filter_registered == "Yes"):
-                queryset = queryset.filter(cashin__purpose__purpose="registration")
+                queryset = queryset.filter(cashin__purpose__purpose="registration",current_year__year__exact = F("cashin__academic_year__year")).distinct()
 
             else:
-                queryset = queryset.exclude(cashin__purpose__purpose="registration")
+                queryset = queryset.exclude(cashin__purpose__purpose="registration",current_year__year__exact = F("cashin__academic_year__year")).distinct()
 
-        # filter_owing = self.request.query_params.get('owing')
-        # if filter_owing:
-        #     if(filter_owing == "yes"):
-        #         queryset = queryset.filter(cashin__purpose="registration")
-
-        #     else:
-        #         queryset = queryset.exclude(cashin__purpose="registration")
-
-        filter_owing = self.request.query_params.get('owing')
-
-        if(filter_owing):
-            if filter_owing == 'yes' or filter_owing == 'Yes':
-                queryset = queryset.annotate(
-                    cashin_total=Coalesce(Sum('cashin__amount', filter=models.Q(cashin__purpose__purpose='installment')), 0, output_field=IntegerField())
-                )
-                
-                queryset = queryset.exclude(student_class__fee=F('cashin_total'))
-            else:
-                queryset = queryset.annotate(
-                    cashin_total=Coalesce(Sum('cashin__amount', filter=models.Q(cashin__purpose__purpose='installment')), 0, output_field=IntegerField())
-                )
-                queryset = queryset.filter(student_class__fee=F('cashin_total'))
-
+        
         filter_year = self.request.query_params.get('year')
 
         if filter_year:
             queryset = queryset.filter(current_year__year__icontains=filter_year)
-            
 
+
+        filter_owing = self.request.query_params.get('owing')
+
+        if(filter_owing):
+            
+            if filter_owing == 'yes' or filter_owing == 'Yes':
+
+                # filter registered first
+                # queryset = queryset.filter(cashin__purpose__purpose="registration",current_year__year__exact = F("cashin__academic_year__year")).distinct()
+
+                # filter completed school fees
+                queryset = queryset.filter(owing = True)
+
+            else:
+                # filter registered first
+                # queryset = queryset.exclude(cashin__purpose__purpose="registration",current_year__year__exact = F("cashin__academic_year__year")).distinct()
+
+                # filter completed school fees
+                queryset = queryset.filter(owing = False)
+
+                # queryset = queryset.annotate(
+                #     cashin_total=Coalesce(Sum('cashin__amount', filter=models.Q(cashin__purpose__purpose='installment')), 0, output_field=IntegerField())
+                # )
+                # queryset = queryset.filter(student_class__fee=F('cashin_total'))
+            
         return queryset.order_by('id')
+    
+    def perform_update(self, serializer):
+        print("update student")
+        
+        student = serializer.validated_data
+        student_instance = serializer.instance
+        current_year_cash_ins = CashIn.objects.filter(student = student_instance.id,academic_year = student["current_year"], purpose = "installement")
+        try:
+            CashIn.objects.get(student = student_instance.id,academic_year = student["current_year"], purpose="registration")
+            total_cash_ins = 0
+            for cashIn in current_year_cash_ins:
+                total_cash_ins += int(cashIn.amount)
+            student_is_owing = total_cash_ins < int(student["student_class"].fee)
+            student["owing"] = student_is_owing
+        except:
+            student["owing"] = True
+
+        serializer.save()
     
 class SubjectViewSet(viewsets.ModelViewSet):
     """
@@ -234,14 +255,69 @@ class CashInViewSet(viewsets.ModelViewSet):
         purposeSerializer = PurposeSerializer(purposes, many = True)
 
         return Response([studentSerializer.data, academicYearsSerializer.data, purposeSerializer.data])
-    
-    # def retrieve(self, request, *args, **kwargs):
-    #     instance = self.get_object()
-    #     classSerializer = ClassSerializer(instance.student_class)
-    #     serializer = self.get_serializer(instance)
-    #     student_data = serializer.data
-    #     student_data['class'] = classSerializer.data
-    #     return Response(student_data)
+
+
+    def perform_create(self, serializer):
+        print("add cash in")
+        serializer.save()
+
+        cashIn = serializer.validated_data
+        student = cashIn["student"]
+        current_year_cash_ins = CashIn.objects.filter(student = student,academic_year = student.current_year, purpose = "installement")
+        
+        try:
+            print(CashIn.objects.all().count)
+            CashIn.objects.get(student = student.id,academic_year = student.current_year, purpose="registration")
+            total_cash_ins = 0
+            for cashIn in current_year_cash_ins:
+                total_cash_ins += int(cashIn.amount)
+            student_is_owing = total_cash_ins < int(student.student_class.fee)
+            student.owing = student_is_owing
+        except:
+            student.owing = True
+
+        student.save()
+
+    def perform_update(self, serializer):
+        print("update cash in")
+        serializer.save()
+        
+        cashIn = serializer.validated_data
+        student = cashIn["student"]
+        current_year_cash_ins = CashIn.objects.filter(student = student,academic_year = student.current_year, purpose = "installement")
+
+        try:
+            CashIn.objects.get(student = student.id,academic_year = student.current_year, purpose="registration")
+            total_cash_ins = 0
+            for cashIn in current_year_cash_ins:
+                total_cash_ins += int(cashIn.amount)
+            student_is_owing = total_cash_ins < int(student.student_class.fee)
+            student.owing = student_is_owing
+        except:
+            student.owing = True
+
+        student.save()
+        
+
+    def perform_destroy(self, instance):
+        print("delete cash in")
+        student = instance.student
+        instance.delete()
+
+        current_year_cash_ins = CashIn.objects.filter(student = student,academic_year = student.current_year, purpose = "installement")
+        
+        try:
+            CashIn.objects.get(student = instance.id,academic_year = student.current_year, purpose="registration")
+            total_cash_ins = 0
+            for cashIn in current_year_cash_ins:
+                total_cash_ins += int(cashIn.amount)
+            student_is_owing = total_cash_ins < int(student.student_class.fee)
+            student.owing = student_is_owing
+
+        except:
+            student.owing = True
+        student.save()
+
     
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -303,14 +379,6 @@ class CashInViewSet(viewsets.ModelViewSet):
             else:
                 queryset = queryset.exclude(cashin__purpose__purpose="registration")
 
-        # filter_owing = self.request.query_params.get('owing')
-        # if filter_owing:
-        #     if(filter_owing == "yes"):
-        #         queryset = queryset.filter(cashin__purpose="registration")
-
-        #     else:
-        #         queryset = queryset.exclude(cashin__purpose="registration")
-
         filter_owing = self.request.query_params.get('owing')
 
         if(filter_owing):
@@ -365,24 +433,11 @@ class CashOutViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def lists(self, request):
-        # students = Student.objects.all()
-        # studentSerializer = StudentSerializer(students, many=True)
-
-        # academicYears = AcademicYear.objects.all()
-        # academicYearsSerializer = AcademicYearSerializer(academicYears, many = True)
 
         purposes = CashOutPurpose.objects.all()
         purposeSerializer = PurposeSerializer(purposes, many = True)
 
         return Response([purposeSerializer.data])
-    
-    # def retrieve(self, request, *args, **kwargs):
-    #     instance = self.get_object()
-    #     classSerializer = ClassSerializer(instance.student_class)
-    #     serializer = self.get_serializer(instance)
-    #     student_data = serializer.data
-    #     student_data['class'] = classSerializer.data
-    #     return Response(student_data)
     
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
@@ -395,20 +450,6 @@ class CashOutViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(queryset, many=True)
         
         cash_out_data = serializer.data
-        
-        # # Retrieve all unique class IDs from the list of students
-        # student_ids = list(set(cash_in['student'] for cash_in in cash_in_data))
-        # cash_in_ids = [cash_in['id'] for cash_in in cash_in_data]
-        
-        # # Fetch the class objects for the associated class IDs
-        # student_objects = Student.objects.filter(id__in=student_ids)
-        # student_serializer = StudentSerializer(student_objects, many=True)
-        # student_data_by_id = {str(student_obj.id): student_serializer.data[idx] for idx, student_obj in enumerate(student_objects)}
-        
-        # for cash_in in cash_in_data:
-        #     cash_in_student_id = str(cash_in['student'])
-        #     if cash_in_student_id in student_data_by_id:
-        #         cash_in['student_data'] = student_data_by_id[cash_in_student_id]
         
         return Response(cash_out_data)
     
@@ -430,47 +471,6 @@ class CashOutViewSet(viewsets.ModelViewSet):
         filter_amount = self.request.query_params.get('amount')
         if filter_amount:
             queryset = queryset.filter(amount__icontains=filter_amount)
-
-        # filter_parent_phone = self.request.query_params.get('parent_phone')
-        # if filter_parent_phone:
-        #     queryset = queryset.filter(parent_phone__icontains=filter_parent_phone)
-
-        # filter_registered = self.request.query_params.get('registered')
-        # if filter_registered:
-        #     if(filter_registered == "yes" or filter_registered == "Yes"):
-        #         queryset = queryset.filter(cashin__purpose__purpose="registration")
-
-        #     else:
-        #         queryset = queryset.exclude(cashin__purpose__purpose="registration")
-
-        # filter_owing = self.request.query_params.get('owing')
-        # if filter_owing:
-        #     if(filter_owing == "yes"):
-        #         queryset = queryset.filter(cashin__purpose="registration")
-
-        #     else:
-        #         queryset = queryset.exclude(cashin__purpose="registration")
-
-        # filter_owing = self.request.query_params.get('owing')
-
-        # if(filter_owing):
-        #     if filter_owing == 'yes' or filter_owing == 'Yes':
-        #         queryset = queryset.annotate(
-        #             cashin_total=Coalesce(Sum('cashin__amount', filter=models.Q(cashin__purpose__purpose='installment')), 0, output_field=IntegerField())
-        #         )
-                
-        #         queryset = queryset.exclude(student_class__fee=F('cashin_total'))
-        #     else:
-        #         queryset = queryset.annotate(
-        #             cashin_total=Coalesce(Sum('cashin__amount', filter=models.Q(cashin__purpose__purpose='installment')), 0, output_field=IntegerField())
-        #         )
-        #         queryset = queryset.filter(student_class__fee=F('cashin_total'))
-
-        # filter_year = self.request.query_params.get('year')
-
-        # if filter_year:
-        #     queryset = queryset.filter(academic_year__year__icontains=filter_year)
-
 
         filter_start_date = self.request.query_params.get('start_date')
 
@@ -590,18 +590,108 @@ class CustomUserUpdateView(APIView):
             return Response(status=status.HTTP_417_EXPECTATION_FAILED)
         
         return Response(status=200)
-        # try:
-        #     users = request.user
-        #     custom_user = CustomUser.objects.get(user=user)
-        # except CustomUser.DoesNotExist:
-        #     return Response(status=status.HTTP_409_CONFLICT)
-        
-        
 
-        # Deserialize the request data
-        # serializer = CustomUserSerializer(custom_user, data=request.data)
-        # if serializer.is_valid():
-        #     # Save the updated custom user
-        #     serializer.save()
-        #     return Response(serializer.data)
-        # return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+# -----------------------------For the dashboard ----------------------------
+
+# returns the list of academic years for the dashboard
+@api_view()
+def academic_years(request):
+    academicYears = AcademicYear.objects.all()
+    academicYearsSerializer = AcademicYearSerializer(academicYears, many = True)
+    return Response(academicYearsSerializer.data)
+
+
+# returns the matrics of the dashboard
+@api_view()
+def metrics(request):
+    current_year = request.query_params.get('current_year')
+    if(current_year):
+        try:
+            year_obj = AcademicYear.objects.get(year = current_year)
+
+            number_of_students = Student.objects.filter(current_year = year_obj).count()
+            number_of_classes = Class.objects.all().count()
+
+            start_year, end_year = current_year.split('/')
+            start_date = datetime.strptime(start_year, '%Y').date()
+            end_date = datetime.strptime(end_year, '%Y').date()
+
+            number_of_cash_ins = CashIn.objects.filter(date__range=[start_date, end_date]).count()
+            number_of_cash_outs = CashOut.objects.filter(date__range=[start_date, end_date]).count()
+
+            return Response({"num_students":number_of_students,
+                             "num_classes":number_of_classes,
+                             "num_cashin":number_of_cash_ins,
+                             "num_cashout":number_of_cash_outs,
+                             })
+        except:
+            return Response(status = status.HTTP_422_UNPROCESSABLE_ENTITY)
+        
+    else:
+        return Response(status = status.HTTP_406_NOT_ACCEPTABLE)
+
+
+# returns information about the graph of the dashboard
+@api_view()
+def graph(request):
+    current_year = request.query_params.get('current_year')
+    if(current_year):
+        try:
+
+            AcademicYear.objects.get(year = current_year)
+
+            start_year, end_year = current_year.split('/')
+            start_date = datetime.strptime(start_year, '%Y').date()
+            end_date = datetime.strptime(end_year, '%Y').date()
+
+            cash_ins = CashIn.objects.filter(date__range=[start_date, end_date])
+            cash_outs = CashOut.objects.filter(date__range=[start_date, end_date])
+
+            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep","Oct", "Nov", "Dec"]
+            months_indices = ["01", "02", "03", "04", "05", "06", "07", "08", "09","10", "11", "12"]
+
+            response_body = []
+
+            i = 0
+            for month in months:
+                response_body.append(get_month_graph_item(cash_ins, cash_outs, months, months_indices, month))
+                i+=1
+
+            net_income = 0
+            for item in response_body:
+                net_income += get_valid_value(item["cashin"]) - get_valid_value(item["cashout"])
+
+            response_body.append({"net_income":net_income})
+
+            return Response(
+                response_body
+            )
+        except:
+            return Response(status = status.HTTP_422_UNPROCESSABLE_ENTITY)
+        
+    else:
+        return Response(status = status.HTTP_406_NOT_ACCEPTABLE)
+    
+
+def get_month_graph_item(cash_ins,cash_outs,months, months_indices, month):
+
+    index = months.index(month)
+    month_in_date_str = months_indices[index]
+
+    month_cash_ins = cash_ins.filter(date__regex=r'^\d{4}'+'-'+month_in_date_str+'\\b')
+    month_cash_outs = cash_outs.filter(date__regex=r'^\d{4}'+'-'+month_in_date_str+'\\b')
+
+    total_cash_ins = month_cash_ins.aggregate(sum_amount=Sum('amount')).get('sum_amount', 0)
+
+    total_cash_outs = month_cash_outs.aggregate(sum_amount=Sum('amount')).get('sum_amount', 0)
+
+    return {
+        "month":month,
+        "cashin":total_cash_ins,
+        "cashout":total_cash_outs,
+    }
+
+def get_valid_value(value):
+    if value:
+        return value
+    return 0

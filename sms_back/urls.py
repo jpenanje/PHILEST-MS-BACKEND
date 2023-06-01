@@ -3,6 +3,7 @@ from rest_framework import routers
 from apis import views as apis_views
 from rest_framework.authtoken import views
 from apis.views import CustomAuthTokenView, CustomUserUpdateView
+from apis.views import academic_years, metrics, graph
 
 router = routers.DefaultRouter()
 # router.register(r'users', apis_views.UserViewSet)
@@ -25,5 +26,7 @@ urlpatterns = [
     path('api-auth/', include('rest_framework.urls', namespace='rest_framework')),
     path('api-token-auth/', CustomAuthTokenView.as_view(), name='api-token-auth'),
     path('custom_user/', CustomUserUpdateView.as_view(), name='custom-user-update'),
-    # path('api-token-auth/', views.obtain_auth_token)
+    path('years/', academic_years, name='hello_world'),
+    path('metrics/', metrics, name='metrics'),
+    path('graph/', graph, name='graph')
 ]
